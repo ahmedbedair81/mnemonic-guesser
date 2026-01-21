@@ -1,0 +1,48 @@
+[package]
+name = "mnemonic-guesser"
+version = "0.1.0"
+edition = "2021"
+description = "A tool for generating and checking mnemonic wallet balances"
+authors = ["Mnemonic Guesser Team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bedair81/mnemonic-guesser"
+keywords = ["bitcoin", "wallet", "mnemonic", "bip39", "blockchain"]
+categories = ["cryptography", "finance"]
+
+[dependencies]
+# Cryptographic and blockchain libraries
+bip39 = "2.0"
+bitcoin = "0.32"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Async runtime
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+# Async utilities
+futures = "0.3"
+
+# Random number generation
+rand = "0.8"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# GUI framework
+iced = { version = "0.12", features = ["tokio", "debug"] }
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Development dependencies
+[dev-dependencies]
+tempfile = "3.0"
+mockito = "1.0"
+criterion = "0.5"
+
+[[bench]]
+name = "wallet_generation"
+harness = false
