@@ -177,8 +177,8 @@ impl Default for WalletConfig {
 impl WalletConfig {
     /// Validate wallet configuration
     pub fn validate(&self) -> Result<()> {
-        // Validate network
-        match self.network.to_lowercase().as_str() {
+        // Validate network (values are stored lowercase by convention)
+        match self.network.as_str() {
             "bitcoin" | "mainnet" | "testnet" | "signet" | "regtest" => {}
             _ => {
                 return Err(AppError::Config {
@@ -225,41 +225,25 @@ impl Default for UiConfig {
     }
 }
 
+/// Validate that a UI dimension value is positive.
+fn validate_positive(value: f32, field: &str, label: &str) -> Result<()> {
+    if value <= 0.0 {
+        return Err(AppError::Config {
+            field: field.to_string(),
+            value: Some(value.to_string()),
+            reason: format!("{} must be positive", label),
+        });
+    }
+    Ok(())
+}
+
 impl UiConfig {
     /// Validate UI configuration
     pub fn validate(&self) -> Result<()> {
-        if self.label_width <= 0.0 {
-            return Err(AppError::Config {
-                field: "ui.label_width".to_string(),
-                value: Some(self.label_width.to_string()),
-                reason: "Label width must be positive".to_string(),
-            });
-        }
-
-        if self.value_width <= 0.0 {
-            return Err(AppError::Config {
-                field: "ui.value_width".to_string(),
-                value: Some(self.value_width.to_string()),
-                reason: "Value width must be positive".to_string(),
-            });
-        }
-
-        if self.current_wallet_height <= 0.0 {
-            return Err(AppError::Config {
-                field: "ui.current_wallet_height".to_string(),
-                value: Some(self.current_wallet_height.to_string()),
-                reason: "Current wallet height must be positive".to_string(),
-            });
-        }
-
-        if self.found_wallet_height <= 0.0 {
-            return Err(AppError::Config {
-                field: "ui.found_wallet_height".to_string(),
-                value: Some(self.found_wallet_height.to_string()),
-                reason: "Found wallet height must be positive".to_string(),
-            });
-        }
-
+        validate_positive(self.label_width, "ui.label_width", "Label width")?;
+        validate_positive(self.value_width, "ui.value_width", "Value width")?;
+        validate_positive(self.current_wallet_height, "ui.current_wallet_height", "Current wallet height")?;
+        validate_positive(self.found_wallet_height, "ui.found_wallet_height", "Found wallet height")?;
         Ok(())
     }
 }

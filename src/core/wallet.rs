@@ -22,11 +22,6 @@ pub struct WalletInfo {
 
     /// Number of words in the mnemonic
     pub word_count: usize,
-
-    /// Seed bytes (cached for performance, not serialized)
-    #[serde(skip)]
-    #[allow(dead_code)]
-    seed: Vec<u8>,
 }
 
 impl WalletInfo {
@@ -34,16 +29,13 @@ impl WalletInfo {
     pub fn new(mnemonic: &Mnemonic, addresses: Vec<AddressInfo>) -> Self {
         let word_count = mnemonic.word_count();
         let total_balance = addresses.iter().map(|a| a.balance).sum();
-        let num_failed_checks = 0usize;
-        let seed = mnemonic.to_seed("").to_vec();
 
         Self {
             mnemonic: mnemonic.to_string(),
             addresses,
             total_balance,
-            num_failed_checks,
+            num_failed_checks: 0,
             word_count,
-            seed,
         }
     }
 
@@ -56,7 +48,6 @@ impl WalletInfo {
     }
 
     /// Get the primary private key (first one, typically P2PKH)
-    #[allow(dead_code)]
     pub fn primary_private_key(&self) -> &str {
         self.addresses
             .first()
@@ -68,13 +59,6 @@ impl WalletInfo {
     pub fn total_balance(&self) -> u64 {
         self.total_balance
     }
-
-    /// Get all addresses for this wallet
-    #[allow(dead_code)]
-    pub fn all_addresses(&self) -> &[AddressInfo] {
-        &self.addresses
-    }
-
 
     /// Check if wallet has any balance
     pub fn has_balance(&self) -> bool {
@@ -106,26 +90,7 @@ pub struct AddressInfo {
 }
 
 impl AddressInfo {
-    /// Create a new address info
-    #[allow(dead_code)]
-    pub fn new(
-        address: String,
-        private_key: String,
-        derivation_path: String,
-        address_type: String,
-    ) -> Self {
-        Self {
-            address,
-            private_key,
-            derivation_path,
-            address_type,
-            balance: 0,
-            checked: false,
-        }
-    }
-
     /// Check if this address has a balance
-    #[allow(dead_code)]
     pub fn has_balance(&self) -> bool {
         self.balance > 0
     }
@@ -163,7 +128,7 @@ impl WalletGenerator {
         })
     }
 
-    pub async fn generate_wallet(&self) -> crate::core::error::Result<WalletInfo> {
+    pub fn generate_wallet(&self) -> crate::core::error::Result<WalletInfo> {
         let mnemonic = self.generate_random_mnemonic()?;
         let addresses = self.derive_all_addresses(&mnemonic)?;
         Ok(WalletInfo::new(&mnemonic, addresses))

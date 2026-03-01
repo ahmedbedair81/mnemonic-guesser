@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::time::{sleep, timeout};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// API response structure from mempool.space
 #[derive(Serialize, Deserialize, Debug)]
@@ -67,136 +67,6 @@ impl ApiClient {
         }
     }
 
-    /// Check balance for a single address with retry logic and exponential backoff
-    #[allow(dead_code)]
-    async fn get_balance_with_retry(&self, address: &str) -> Result<u64> {
-        let url = format!("{}/address/{}", self.config.api.base_url, address);
-
-        debug!("Checking balance for address: {}", address);
-        debug!("API Request: GET {}", url);
-
-        let mut attempt = 0;
-        let max_retries = self.config.api.max_retries;
-
-        loop {
-            attempt += 1;
-
-            // Add timeout wrapper for long-running requests
-            let request_future = self.client.get(&url).send();
-
-            match timeout(self.config.api_timeout(), request_future).await {
-                Ok(Ok(response)) => {
-                    let status = response.status();
-                    debug!("Response Status: {}", status);
-
-                    if status.is_success() {
-                        match response.json::<MempoolResponse>().await {
-                            Ok(mempool_data) => {
-                                let funded = mempool_data.chain_stats.funded_txo_sum;
-                                let spent = mempool_data.chain_stats.spent_txo_sum;
-                                let balance = funded.saturating_sub(spent);
-
-                                debug!(
-                                    "Balance Data - Funded: {} sat, Spent: {} sat, Balance: {} sat",
-                                    funded, spent, balance
-                                );
-
-                                return Ok(balance);
-                            }
-                            Err(e) => {
-                                error!("Failed to parse JSON response: {:?}", e);
-                                return Err(AppError::Network {
-                                    source: Box::new(e),
-                                    url: Some(url),
-                                    retry_count: Some(attempt),
-                                });
-                            }
-                        }
-                    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                        if attempt <= max_retries {
-                            let retry_delay = self.config.rate_limit_delay() * attempt as u32;
-                            warn!(
-                                "Rate limited (attempt {}/{}), waiting {}ms before retry",
-                                attempt,
-                                max_retries,
-                                retry_delay.as_millis()
-                            );
-                            sleep(retry_delay).await;
-                            continue;
-                        } else {
-                            return Err(AppError::RateLimit {
-                                retry_after_seconds: self.config.rate_limit_delay().as_secs(),
-                                request_count: attempt,
-                            });
-                        }
-                    } else {
-                        let status_code = status.as_u16();
-                        return Err(AppError::Network {
-                            source: Box::new(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!(
-                                    "HTTP {}: {}",
-                                    status_code,
-                                    status.canonical_reason().unwrap_or("Unknown error")
-                                ),
-                            )),
-                            url: Some(url),
-                            retry_count: Some(attempt),
-                        });
-                    }
-                }
-                Ok(Err(e)) => {
-                    if attempt <= max_retries {
-                        warn!(
-                            "Request failed (attempt {}/{}): {:?}",
-                            attempt, max_retries, e
-                        );
-                        let retry_delay = self.config.rate_limit_delay() * attempt as u32;
-                        sleep(retry_delay).await;
-                        continue;
-                    } else {
-                        error!("Request failed after {} attempts: {:?}", max_retries, e);
-                        return Err(AppError::Network {
-                            source: Box::new(e),
-                            url: Some(url),
-                            retry_count: Some(attempt),
-                        });
-                    }
-                }
-                Err(_) => {
-                    // Timeout occurred
-                    if attempt <= max_retries {
-                        warn!(
-                            "Request timeout (attempt {}/{}), retrying...",
-                            attempt, max_retries
-                        );
-                        let retry_delay = self.config.rate_limit_delay() * attempt as u32;
-                        sleep(retry_delay).await;
-                        continue;
-                    } else {
-                        return Err(AppError::Network {
-                            source: Box::new(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "Request timeout after all retries",
-                            )),
-                            url: Some(url),
-                            retry_count: Some(attempt),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    /// Check balance for a single address (public interface)
-    #[allow(dead_code)]
-    pub async fn check_wallet_balance(&self, address: &str) -> Result<u64> {
-        let balance = self.get_balance_with_retry(address).await?;
-        // Rate limiting delay to be respectful to the API
-        sleep(self.config.rate_limit_delay()).await;
-        Ok(balance)
-    }
-
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -223,7 +93,7 @@ impl ApiClient {
 
                             debug!("Balance for {}: {} sat", address, balance);
                             return BalanceResult {
-                                address: address_owned.clone(),
+                                address: address_owned,
                                 balance,
                                 error: None,
                             };
@@ -319,15 +189,13 @@ impl ApiClient {
 
         // Create concurrent tasks for all addresses
         // Clone client once per task (Client uses Arc internally, so cheap)
-        // Share base_url as Arc to reduce cloning
-        use std::sync::Arc as StdArc;
-        let base_url_arc: StdArc<str> = StdArc::from(base_url);
+        let base_url_arc: Arc<str> = Arc::from(base_url);
         let tasks: Vec<_> = addresses
             .iter()
             .map(|&address| {
                 let client = self.clone_for_task();
                 let addr = address.to_string();
-                let base_url = base_url_arc.clone();
+                let base_url = Arc::clone(&base_url_arc);
 
                 async move {
                     client.check_single_address_with_retry(&addr, &base_url).await
@@ -354,61 +222,52 @@ impl ApiClient {
 /// Check wallet balances concurrently for maximum performance
 pub async fn check_wallet_with_balance(
     api_client: Arc<ApiClient>,
-    mut wallet_info: WalletInfo,
-) -> Result<WalletInfo> {
-    // Collect pending (unchecked) addresses
-    let pending_indices: Vec<usize> = wallet_info.addresses
+    wallet_info: &mut WalletInfo,
+) -> Result<()> {
+    // Collect pending (unchecked) address indices and their string slices in one pass
+    let (pending_indices, pending_addresses): (Vec<usize>, Vec<String>) = wallet_info
+        .addresses
         .iter()
         .enumerate()
-        .filter_map(|(i, a)| if !a.checked { Some(i) } else { None })
-        .collect();
+        .filter(|(_, a)| !a.checked)
+        .map(|(i, a)| (i, a.address.clone()))
+        .unzip();
 
     if pending_indices.is_empty() {
-        return Ok(wallet_info);
+        return Ok(());
     }
 
-        // Collect pending addresses as string references for batch checking
-        let pending_addresses: Vec<&str> = pending_indices
-            .iter()
-            .map(|&i| wallet_info.addresses[i].address.as_str())
-            .collect();
+    // Check pending balances concurrently
+    let base_url = &api_client.config().api.base_url;
+    let pending_refs: Vec<&str> = pending_addresses.iter().map(String::as_str).collect();
+    let balance_results = api_client.perform_batch_check(base_url, &pending_refs).await;
 
-        // Check pending balances concurrently
-        let base_url = &api_client.config().api.base_url;
-        let balance_results = api_client
-            .perform_batch_check(base_url, &pending_addresses)
-            .await;
-
-        for (j, result) in balance_results.into_iter().enumerate() {
-            let i = pending_indices[j];
-            let addr_info = &mut wallet_info.addresses[i];
-            if result.error.is_none() {
-                addr_info.balance = result.balance;
-                addr_info.checked = true;
-                if result.balance > 0 {
-                    info!(
-                        "Found balance for {}: {} sat",
-                        result.address, result.balance
-                    );
-                }
+    for (j, result) in balance_results.into_iter().enumerate() {
+        let i = pending_indices[j];
+        let addr_info = &mut wallet_info.addresses[i];
+        if result.error.is_none() {
+            addr_info.balance = result.balance;
+            addr_info.checked = true;
+            if result.balance > 0 {
+                info!(
+                    "Found balance for {}: {} sat",
+                    result.address, result.balance
+                );
             }
         }
-
-        // Recalculate total balance
-        wallet_info.total_balance = wallet_info.addresses.iter().map(|a| a.balance).sum();
-        wallet_info.num_failed_checks = wallet_info
-            .addresses
-            .iter()
-            .filter(|a| !a.checked)
-            .count();
-
-        if wallet_info.total_balance > 0 {
-            info!(
-                "Total wallet balance: {} sat across {} addresses",
-                wallet_info.total_balance,
-                wallet_info.addresses.len()
-            );
-        }
-
-        Ok(wallet_info)
     }
+
+    // Recalculate total balance
+    wallet_info.total_balance = wallet_info.addresses.iter().map(|a| a.balance).sum();
+    wallet_info.num_failed_checks = wallet_info.addresses.iter().filter(|a| !a.checked).count();
+
+    if wallet_info.total_balance > 0 {
+        info!(
+            "Total wallet balance: {} sat across {} addresses",
+            wallet_info.total_balance,
+            wallet_info.addresses.len()
+        );
+    }
+
+    Ok(())
+}
