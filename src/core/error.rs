@@ -23,12 +23,6 @@ pub enum AppError {
         retry_count: Option<u32>,
     },
 
-    /// Rate limiting errors
-    RateLimit {
-        retry_after_seconds: u64,
-        request_count: u32,
-    },
-
     /// Validation errors for user inputs
     Validation {
         field: String,
@@ -71,13 +65,6 @@ impl fmt::Display for AppError {
                     }
                 }
                 Ok(())
-            }
-            AppError::RateLimit { retry_after_seconds, request_count } => {
-                write!(
-                    f,
-                    "Rate limit exceeded, retry after {} seconds (requests: {})",
-                    retry_after_seconds, request_count
-                )
             }
             AppError::Validation { field, value, reason } => {
                 write!(

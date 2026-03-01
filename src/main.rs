@@ -7,7 +7,6 @@ mod application;
 mod core;
 mod infrastructure;
 mod presentation;
-mod utils;
 
 use crate::core::config::Config;
 use crate::application::services::AppState;
@@ -152,8 +151,8 @@ impl MnemonicGuesser {
             if state.has_active_operations() {
                 return Err(crate::core::error::AppError::Validation {
                     field: "operation".to_string(),
-                    value: "busy".to_string(),
-                    reason: "Another operation is already in progress".to_string(),
+                    value: ERR_OPERATION_BUSY.to_string(),
+                    reason: ERR_BUSY_OPERATION.to_string(),
                 });
             }
 
@@ -200,7 +199,7 @@ impl MnemonicGuesser {
     /// Handle stopping indefinite guessing
     fn handle_stop_indefinite(&mut self) -> Command<Message> {
         let app_state = Arc::clone(&self.app_state);
-        tokio::spawn(async move {
+        self.runtime.block_on(async move {
             let mut state = app_state.write().await;
             state.stop_indefinite_guessing();
         });

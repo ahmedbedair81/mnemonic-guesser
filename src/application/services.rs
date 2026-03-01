@@ -11,6 +11,20 @@ use tracing::info;
 /// Default retry delay when API checks fail (in seconds)
 const DEFAULT_RETRY_DELAY_SECS: u64 = 2;
 
+/// Check whether the stop flag is set and return an error if so.
+fn check_stop_flag(should_stop: Option<&AtomicBool>) -> Result<()> {
+    if let Some(flag) = should_stop {
+        if flag.load(Ordering::Relaxed) {
+            return Err(AppError::Validation {
+                field: "operation".to_string(),
+                value: "stopped".to_string(),
+                reason: "Operation was stopped by user".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Service for managing wallet guessing operations
 #[derive(Clone)]
 pub struct WalletGuessingService {
@@ -39,50 +53,32 @@ impl WalletGuessingService {
         should_stop: Option<&AtomicBool>,
     ) -> Result<WalletInfo> {
         let retry_delay = Duration::from_secs(DEFAULT_RETRY_DELAY_SECS);
-        
-        /// Helper to check stop flag and return error if set
-        fn check_stop_flag(should_stop: Option<&AtomicBool>) -> Result<()> {
-            if let Some(stop_flag) = should_stop {
-                if stop_flag.load(Ordering::Relaxed) {
-                    return Err(AppError::Validation {
-                        field: "operation".to_string(),
-                        value: "stopped".to_string(),
-                        reason: "Operation was stopped by user".to_string(),
-                    });
-                }
-            }
-            Ok(())
-        }
-        
+
         loop {
             // Check stop flag before starting API call
             check_stop_flag(should_stop)?;
-            
+
             match crate::infrastructure::api::check_wallet_with_balance(
                 Arc::clone(&api_client),
-                wallet.clone(),
+                &mut wallet,
             )
-            .await {
-                Ok(w) => wallet = w,
+            .await
+            {
+                Ok(()) => {}
                 Err(_) => {
-                    // Check stop flag after error, before sleeping
-                    check_stop_flag(should_stop)?;
                     sleep(retry_delay).await;
                     continue;
                 }
             }
-            
-            // Check stop flag immediately after API call completes
+
+            // Check stop flag after API call completes
             check_stop_flag(should_stop)?;
-            
+
             // If all addresses are checked, we're done
             if wallet.num_failed_checks == 0 {
                 return Ok(wallet);
             }
-            
-            // Check stop flag before sleeping
-            check_stop_flag(should_stop)?;
-            
+
             // Some addresses still failed - retry after a delay
             sleep(retry_delay).await;
         }
@@ -90,7 +86,7 @@ impl WalletGuessingService {
 
     /// Generate a single wallet and check its balance
     pub async fn generate_and_check_wallet(&self) -> crate::core::error::Result<WalletInfo> {
-        let wallet = self.wallet_generator.generate_wallet().await?;
+        let wallet = self.wallet_generator.generate_wallet()?;
         Self::check_wallet_with_retries(
             Arc::clone(&self.api_client),
             wallet,
@@ -137,7 +133,7 @@ impl AppState {
     pub async fn new(config: Arc<Config>) -> Result<Self> {
         let service = WalletGuessingService::new(config).await?;
 
-        Ok(        Self {
+        Ok(Self {
             service,
             current_wallet: None,
             found_wallet: None,
@@ -213,7 +209,7 @@ impl AppState {
                     }
                     
                     // Generate a new wallet
-                    let wallet = match wallet_gen.generate_wallet().await {
+                    let wallet = match wallet_gen.generate_wallet() {
                         Ok(w) => w,
                         Err(_) => {
                             // Check stop flag after generation error
@@ -279,9 +275,8 @@ impl AppState {
                 match handle.await {
                     Ok(Ok(wallet)) => {
                         self.attempts += 1;
-                        let has_balance = wallet.has_balance();
-                        if has_balance {
-                            self.handle_wallet_with_balance(wallet.clone());
+                        if wallet.has_balance() {
+                            self.handle_wallet_with_balance(wallet);
                         } else {
                             self.current_wallet = Some(wallet);
                         }
@@ -318,13 +313,12 @@ impl AppState {
             match result {
                 Ok(wallet) => {
                     self.attempts += 1;
-                    let has_balance = wallet.has_balance();
-                    self.current_wallet = Some(wallet.clone());
-
-                    if has_balance {
+                    if wallet.has_balance() {
                         self.handle_wallet_with_balance(wallet);
                         self.stop_indefinite_guessing();
                         break;
+                    } else {
+                        self.current_wallet = Some(wallet);
                     }
                 }
                 Err(e) => {
@@ -340,7 +334,7 @@ impl AppState {
         let new_word_count = match self.service.config().wallet.word_count {
             12 => 24,
             24 => 12,
-            _ => 24,
+            _ => unreachable!("word_count is validated to be 12 or 24"),
         };
 
         // Update config without full clone - modify in place where possible
@@ -352,37 +346,33 @@ impl AppState {
         Ok(())
     }
 
+    /// Apply a mutation to ApiConfig, validate, and commit
+    async fn update_api_config<F: FnOnce(&mut crate::core::config::ApiConfig)>(
+        &mut self,
+        mutate: F,
+    ) -> Result<()> {
+        let mut new_config = (**self.service.config()).clone();
+        mutate(&mut new_config.api);
+        new_config.api.validate()?;
+        self.service.update_config(Arc::new(new_config)).await
+    }
+
     /// Update API URL
     pub async fn update_api_url(&mut self, url: String) -> Result<()> {
-        // Create new config with updated URL
-        let mut new_config = (**self.service.config()).clone();
-        new_config.api.base_url = url;
-
-        // Validate before updating (fail fast)
-        new_config.api.validate()?;
-
-        self.service.update_config(Arc::new(new_config)).await?;
-        Ok(())
+        self.update_api_config(|api| api.base_url = url).await
     }
 
     /// Update Fallback API URL
     pub async fn update_fallback_api_url(&mut self, url: String) -> Result<()> {
-        let fallback = url.trim();
-        let fallback_opt = if fallback.is_empty() {
-            None
-        } else {
-            Some(fallback.to_string())
-        };
-
-        // Create new config with updated fallback
-        let mut new_config = (**self.service.config()).clone();
-        new_config.api.fallback_base_url = fallback_opt;
-
-        // Validate before updating (fail fast)
-        new_config.api.validate()?;
-
-        self.service.update_config(Arc::new(new_config)).await?;
-        Ok(())
+        self.update_api_config(|api| {
+            let trimmed = url.trim();
+            api.fallback_base_url = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        })
+        .await
     }
 
     /// Handle successful wallet discovery
